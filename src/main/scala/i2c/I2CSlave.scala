@@ -5,34 +5,37 @@ package i2cslave
 import chisel3._
 import chisel3.util._
 import chisel3.util.Enum
-/**
-  * Compute GCD using subtraction method.
-  * Subtracts the smaller from the larger until register y is zero.
-  * value in register x is then the GCD
-  */
+
+class I2CSlaveRegIO(addressWidth: Int) extends Bundle {
+  val address = Input(UInt(addressWidth.W))
+  val is_write = Input(Bool())
+  val write_data = Input(UInt(8.W))
+  val read_data = Output(UInt(8.W))
+  val request = Input(Bool())
+  val response = Output(Bool())
+
+  override def cloneType: this.type = new I2CSlaveRegIO(addressWidth).asInstanceOf[this.type]
+}
+
+class I2CIO extends Bundle {
+  val sda_i = Input(Bool())
+  val sda_o = Output(Bool())
+  val scl_i = Input(Bool())
+  val scl_o = Output(Bool())
+}
+
 class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Module {
   val io = IO(new Bundle {
-    val sda_i = Input(Bool())
-    val sda_o = Output(Bool())
-    val scl_i = Input(Bool())
-    val scl_o = Output(Bool())
-
-    val reg_request = DecoupledIO(new Bundle {
-      val address = UInt(addressWidth.W)
-      val is_write = Bool()
-      val data = UInt(8.W)
-    })
-    val reg_response = Flipped(DecoupledIO(new Bundle {
-      val data = UInt(8.W)
-    }))
+    val i2c = new I2CIO
+    val reg_if = Flipped(new I2CSlaveRegIO(addressWidth))
   })
 
   val scl_i = RegInit(Bool(), false.B)
   val sda_i = RegInit(Bool(), false.B)
   val scl_o = RegInit(Bool(), true.B)
   val sda_o = RegInit(Bool(), true.B)
-  io.scl_o := scl_o
-  io.sda_o := sda_o
+  io.i2c.scl_o := scl_o
+  io.i2c.sda_o := sda_o
 
   val scl_i_reg = RegInit(Bool(), false.B)
   val sda_i_reg = RegInit(Bool(), false.B)
@@ -54,13 +57,13 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
   scl_i_reg := scl_i
   sda_i_reg := sda_i
 
-  scl_i_filter := Cat(scl_i_filter(filterDepth-2, 0), io.scl_i.asUInt())
-  sda_i_filter := Cat(sda_i_filter(filterDepth-2, 0), io.sda_i.asUInt())
+  scl_i_filter := Cat(scl_i_filter(filterDepth-2, 0), io.i2c.scl_i.asUInt())
+  sda_i_filter := Cat(sda_i_filter(filterDepth-2, 0), io.i2c.sda_i.asUInt())
 
   val start_condition = Wire(Bool())
   val stop_condition = Wire(Bool())
-  start_condition := !scl_i_reg && scl_i
-  stop_condition := scl_i_reg && !scl_i
+  start_condition := scl_i && sda_i_reg && !sda_i
+  stop_condition := scl_i && !sda_i_reg && sda_i
 
   // Byte transmission
   val begin_byte = RegInit(false.B)
@@ -80,7 +83,7 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
   scl_falling := scl_i_reg && !scl_i
 
   when( start_condition || stop_condition ) {
-    bit_counter := false.B
+    bit_counter := 0.U
     input_bits := 0.U
     master_acked := false.B
     active := false.B
@@ -90,8 +93,8 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
     sda_o := true.B
   } .otherwise {
     when( begin_byte ) {
-      active <= true.B
-    } .elsewhen( bit_counter >= 0.U ) {
+      active := true.B
+    } .elsewhen( bit_counter >= 9.U ) {
       active := false.B
     } .otherwise {
       active := active
@@ -101,7 +104,7 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
     end_ack := active && scl_rising && bit_counter >= 8.U
 
     when( !active && begin_byte ) {
-      bit_counter := false.B
+      bit_counter := 0.U
     } .elsewhen ( active && scl_rising && bit_counter < 9.U ) {
       bit_counter := bit_counter + 1.U
     } .otherwise {
@@ -109,7 +112,7 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
     }
 
     when(active && bit_counter < 8.U && scl_rising ) {
-      input_bits := Cat(input_bits(6, 0), sda_i.asUInt())
+      input_bits := Cat(input_bits(6, 0), sda_i)
     } .otherwise {
       input_bits := input_bits
     }
@@ -121,7 +124,7 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
     }
 
     when(active && !scl_i && master_read && bit_counter < 8.U ) {
-      sda_o := output_bits(7.U - bit_counter) != 0.U
+      sda_o := output_bits(7.U - bit_counter)
     } .elsewhen( active && !scl_i && !master_read && bit_counter === 8.U ) {
       sda_o := !next_ack
     } .elsewhen( scl_i ) {
@@ -135,13 +138,18 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
   val i2c_state = RegInit(s_idle)
   val reg_is_write = RegInit(false.B)
   val reg_request = RegInit(false.B)
-  val reg_response = RegInit(false.B)
   val reg_address = RegInit(0.U(addressWidth.W))
   val reg_read_data = RegInit(0.U(8.W))
   val reg_write_data = RegInit(0.U(8.W))
 
+  // external register interface connection
+  io.reg_if.request := reg_request
+  io.reg_if.address := reg_address
+  io.reg_if.is_write := reg_is_write
+  io.reg_if.write_data := reg_write_data
+
   val is_address_matching = Wire(Bool())
-  is_address_matching := input_bits(7, 1) === i2cAddress.U(7)
+  is_address_matching := input_bits(7, 1) === i2cAddress.U(7.W)
 
   begin_byte := false.B
   switch(i2c_state) {
@@ -192,8 +200,8 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
       when( reg_request ) {
         reg_request := false.B
       }
-      when( reg_response ) {
-        output_bits := reg_read_data
+      when( io.reg_if.response ) {
+        output_bits := io.reg_if.read_data
       } otherwise {
         output_bits := output_bits
       }
@@ -218,10 +226,10 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
         reg_request := false.B
       }
 
-      when( reg_response ) {
+      when( io.reg_if.response ) {
         next_ack := true.B
       } .elsewhen( reg_request ) {
-        next_ack := reg_response
+        next_ack := io.reg_if.response
       } .otherwise {
         next_ack := next_ack
       }
@@ -244,33 +252,6 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
         i2c_state := s_idle
       }
     }
-  }
-
-
-  // external memory interface process
-  val reg_request_valid = RegInit(true.B)
-  io.reg_request.bits.address := reg_address
-  io.reg_request.bits.data := reg_write_data
-  io.reg_request.bits.is_write := reg_is_write
-  io.reg_request.valid := reg_request_valid && reg_request
-
-  val reg_response_ready = RegInit(false.B)
-  io.reg_response.ready := reg_response_ready
-
-  when( reg_request ) {
-    reg_response := false.B
-    reg_response_ready := true.B
-    when( reg_request_valid && io.reg_request.ready ) {
-      reg_request_valid := false.B
-    }
-  } .otherwise {
-    reg_request_valid := true.B
-  }
-
-  when( reg_response_ready && io.reg_response.valid ) {
-    reg_response_ready := false.B
-    reg_read_data := io.reg_response.bits.data
-    reg_response := true.B
   }
 
 }
