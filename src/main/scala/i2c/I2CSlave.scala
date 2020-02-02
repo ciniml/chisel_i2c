@@ -155,7 +155,7 @@ class I2CSlave(addressWidth: Int, filterDepth: Int, i2cAddress: Int) extends Mod
   switch(i2c_state) {
     is(s_idle) {
       when( start_condition ) {
-        next_ack := true.B
+        next_ack := false.B
         master_read := false.B
         begin_byte := true.B
         i2c_state := s_device_address
